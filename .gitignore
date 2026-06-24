@@ -12,9 +12,6 @@ inst/doc/
 /Meta/
 /doc/
 
-# Generated man pages (regenerate with devtools::document())
-/man/*.Rd
-
 # Simulation outputs (large files)
 data_code_paper/data/*.rds
 data_code_paper/results/*.csv

@@ -31,6 +31,6 @@ Suggests:
     NOISeq,
     SimSeq
 VignetteBuilder: knitr
-RoxygenNote: 7.3.2
+RoxygenNote: 7.3.3
 URL: https://github.com/xzc0907/CQRM
 BugReports: https://github.com/xzc0907/CQRM/issues
