@@ -1,0 +1,36 @@
+Package: CQRM
+Type: Package
+Title: Composite Quantile Regression Models for Count-Based Differential Expression
+Version: 0.1.0
+Date: 2026-06-23
+Authors@R: person("Zhangchi", "Xu", email = "xzc0907@umd.edu", role = c("aut", "cre"))
+Description: Provides four permutation-calibrated MinP differential expression tests
+    for non-coding RNA (ncRNA) count data based on composite quantile regression
+    score statistics. The methods aggregate rank-score statistics across multiple
+    quantile subsets and calibrate p-values via a multivariate normal null
+    distribution. Functions: CQRM (all 2^K-1 non-empty subsets), CQRM.best
+    (single-quantile MinP), CQRM.region (contiguous-window MinP), and CQRM.approx
+    (fast no-jitter approximation using a single rq.wfit call per quantile).
+License: MIT + file LICENSE
+Encoding: UTF-8
+LazyData: true
+Depends:
+    R (>= 4.0.0)
+Imports:
+    MASS,
+    lqmm (>= 1.5),
+    quantreg (>= 5.9)
+Suggests:
+    knitr,
+    rmarkdown,
+    kableExtra,
+    ggplot2,
+    DESeq2,
+    edgeR,
+    limma,
+    NOISeq,
+    SimSeq
+VignetteBuilder: knitr
+RoxygenNote: 7.3.2
+URL: https://github.com/xzc0907/CQRM
+BugReports: https://github.com/xzc0907/CQRM/issues

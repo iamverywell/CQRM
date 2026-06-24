@@ -1,0 +1,391 @@
+---
+title: "CQRM: Composite Quantile Regression Models for ncRNA Differential Expression"
+subtitle: "Simulation Tutorial — Data Generation, Method Comparison, and Results"
+author: "Zhangchi Xu"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  cache   = FALSE
+)
+```
+
+---
+
+# Overview
+
+This tutorial walks through a complete simulation study using the **CQRM**
+package. We will:
+
+1. **Install / load** the CQRM package and dependencies.
+2. **Generate** a synthetic kidney-inspired dataset.
+3. **Apply** CQRM and comparison methods.
+4. **Display** adjusted p-value tables and FDP/power summaries.
+
+All CQRM methods precompute `solve(subsigma)` *outside* the B-loop so that
+each weight-pattern inverse is computed only once per null simulation, not once
+per null draw.
+
+---
+
+# Setup
+
+## Install CQRM
+
+```{r install, eval=FALSE}
+# From GitHub (once the package is public):
+remotes::install_github("xzc0907/CQRM")
+
+# Or load from local source:
+source("../R/internals.R")
+source("../R/CQRM.R")
+```
+
+## Load dependencies
+
+```{r load-deps}
+# CQRM
+if (requireNamespace("CQRM", quietly = TRUE)) {
+  library(CQRM)
+} else {
+  source("../R/internals.R")
+  source("../R/CQRM.R")
+}
+
+# Comparison methods (loaded from the wrapper script)
+source("comparison_methods.R")
+
+# Display helpers
+library(knitr)
+library(kableExtra)
+```
+
+---
+
+# Data Generation
+
+## Synthetic kidney-inspired dataset
+
+The synthetic data mirrors the design of the paper's non-parametric simulation
+(`synthetic_nonpara_server_1.R`). It uses the `kidney` RNA-seq dataset from the
+**SimSeq** package as a template:
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| `n_gene`  | 500   | Total number of genes in the synthetic dataset |
+| `DE_prop` | 0.10  | Proportion of true differentially expressed (DE) genes |
+| `size`    | 50    | Samples per group drawn from kidney (kidney has 72/group) |
+| `seed`    | 42    | Random seed for reproducibility |
+| `alpha_consensus` | 0.001 | BH threshold for consensus DE gene pool (DESeq2 ∩ Wilcoxon) |
+
+The key steps are:
+
+1. Load and filter genes with >80% zero counts.
+2. Run DESeq2 and Wilcoxon on the full kidney data; intersect their discoveries
+   at a stringent threshold to define the **true DE pool**.
+3. Sample `n_DE = n_gene × DE_prop` genes from the true DE pool.
+4. Sample `n_non_DE = n_gene × (1 − DE_prop)` genes from the non-DE pool and
+   **permute** their group labels so they are truly null.
+5. Stack DE and (permuted) non-DE genes, save as `data/synthetic_kidney.rds`.
+
+```{r generate-data, eval=FALSE}
+# Run once to generate and save the dataset (takes ~5 min for full kidney run).
+# Skip if data/synthetic_kidney.rds already exists.
+source("generate_data.R")
+```
+
+## Load generated data
+
+```{r load-data}
+dat        <- readRDS("data/synthetic_kidney.rds")
+counts     <- dat$counts         # G × (2 * size) integer count matrix
+group      <- dat$group          # group vector: 0 = group 1, 1 = group 2
+is_true_DE <- dat$is_true_DE     # logical: TRUE for true DE genes
+size       <- dat$size           # samples per group
+
+G    <- nrow(counts)
+n_DE <- sum(is_true_DE)
+cat(sprintf("Genes: %d  (DE: %d, non-DE: %d)  |  Samples/group: %d\n",
+            G, n_DE, G - n_DE, size))
+
+count1 <- counts[, group == 0]   # gene × sample matrix, group 1
+count2 <- counts[, group == 1]   # gene × sample matrix, group 2
+```
+
+## Quick look at the data
+
+```{r data-summary, fig.width=7, fig.height=4}
+# Distribution of total counts per sample
+sample_totals <- colSums(counts)
+hist(sample_totals, breaks = 20, main = "Library sizes (total counts/sample)",
+     xlab = "Total counts", col = "steelblue", border = "white")
+
+# Proportion of zeros per gene in group 1
+zero_frac <- rowMeans(count1 == 0)
+hist(zero_frac, breaks = 20, main = "Zero fraction per gene (group 1)",
+     xlab = "Proportion of zero counts", col = "salmon", border = "white")
+```
+
+---
+
+# Running the Methods
+
+## Parameters
+
+```{r params}
+# ── Key parameters (adjust for speed vs. accuracy) ───────────────────────────
+# tau_vec  : quantile levels aggregated by all CQRM variants
+# B        : number of null draws for permutation calibration
+#            Paper uses B = 10000; set B = 500 here for a fast demo
+# M        : jitter replicates per gene per quantile
+#            Paper uses M = 50; set M = 10 here for speed
+# q_thresh : FDR threshold for FDP/power evaluation
+tau_vec  <- c(0.2, 0.4, 0.6, 0.8)
+B        <- 500    # increase to 10000 for production
+M        <- 10     # increase to 50 for production
+q_thresh <- 0.05
+```
+
+## Comparison methods
+
+```{r run-comparisons, results='hide'}
+cat("DESeq2...\n")
+pv_deseq2   <- mydeseq2(count1, count2)
+
+cat("Wilcoxon (DESeq2-normalized)...\n")
+pv_wilcoxon <- my.wilcoxon.deseq2(count1, count2)
+
+cat("edgeR...\n")
+pv_edger    <- myedger(count1, count2)
+
+cat("limma-voom...\n")
+pv_limma    <- tryCatch(my.limmavoom(count1, count2),
+                         error = function(e) rep(NA, G))
+```
+
+## CQRM methods
+
+All four CQRM functions return **calibrated raw p-values**. Apply
+`p.adjust(..., method = "BH")` to obtain FDR-controlled adjusted p-values.
+
+### CQRM.approx — Fast approximation (recommended starting point)
+
+```{r run-approx}
+# No jittering: single rq.wfit call per quantile (fastest CQRM variant).
+# solve(subsigma) precomputed outside the B-loop.
+pv_approx <- my.cqrm.approx(
+  count1,
+  count2,
+  tau_vec = tau_vec,   # quantile levels: 0.2, 0.4, 0.6, 0.8
+  B       = B,         # null draws for calibration
+  zeta    = 1e-5       # floor for log transformation (numerical stability)
+)
+adj_approx <- p.adjust(pv_approx, method = "BH")
+```
+
+### CQRM.best — Single-quantile MinP
+
+```{r run-best}
+# Tests each tau in tau_vec independently; MinP across quantiles.
+# Null distribution from independent normals (scalar variance, no matrix solve).
+pv_best <- my.cqrm.best(
+  count1,
+  count2,
+  tau_vec = tau_vec,   # quantile levels tested individually
+  B       = B,         # null draws for calibration
+  M       = M          # jitter replicates per gene per quantile
+)
+adj_best <- p.adjust(pv_best, method = "BH")
+```
+
+### CQRM.region — Contiguous-window MinP
+
+```{r run-region}
+# Tests all contiguous windows of k consecutive quantiles; MinP across windows.
+# solve(subsigma) precomputed once per window outside the B-loop.
+pv_region <- my.cqrm.region(
+  count1,
+  count2,
+  tau_vec = tau_vec,   # base quantile levels
+  k       = 2,         # window width (number of consecutive quantiles per test)
+  B       = B,         # null draws for calibration
+  M       = M          # jitter replicates per gene per quantile
+)
+adj_region <- p.adjust(pv_region, method = "BH")
+```
+
+### CQRM — Full composite test (all 2^K-1 subsets)
+
+```{r run-cqrm}
+# Tests all 2^K-1 non-empty subsets of tau_vec; MinP across subsets.
+# Null calibrated from MVN null. solve(subsigma) precomputed outside B-loop.
+pv_cqrm <- my.cqrm(
+  count1,
+  count2,
+  tau_vec = tau_vec,   # quantile levels (K = 4 => 15 non-empty subsets tested)
+  B       = B,         # null draws for calibration
+  M       = M,         # jitter replicates per gene per quantile
+  seed    = 12345      # RNG seed for reproducibility
+)
+adj_cqrm <- p.adjust(pv_cqrm, method = "BH")
+```
+
+---
+
+# Results
+
+## Adjusted p-value table (top 20 genes by CQRM)
+
+```{r pval-table}
+adj_pval_df <- data.frame(
+  Gene         = seq_len(G),
+  True_DE      = is_true_DE,
+  DESeq2       = round(pv_deseq2,   4),
+  Wilcoxon     = round(pv_wilcoxon, 4),
+  edgeR        = round(pv_edger,    4),
+  limma_voom   = round(pv_limma,    4),
+  CQRM_Approx = round(adj_approx,  4),
+  CQRM_Best   = round(adj_best,    4),
+  CQRM_Region = round(adj_region,  4),
+  CQRM        = round(adj_cqrm,    4)
+)
+
+# Sort by CQRM adj p-value and display top 20
+top20 <- head(adj_pval_df[order(adj_pval_df$CQRM), ], 20)
+
+kable(
+  top20,
+  caption = "Top 20 genes ranked by CQRM adjusted p-value",
+  align   = "r",
+  row.names = FALSE
+) |>
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = FALSE
+  ) |>
+  column_spec(2,  bold = TRUE,  color = ifelse(top20$True_DE, "green", "red")) |>
+  column_spec(10, bold = TRUE)
+```
+
+*The `True_DE` column is coloured **green** for true positives and **red** for
+false positives.*
+
+## FDP / Power summary
+
+```{r fdp-power-table}
+compute_fdp_power <- function(adj_pv, true_de, q = 0.05) {
+  adj_pv[is.na(adj_pv)] <- 1
+  disc  <- which(adj_pv <= q)
+  if (length(disc) == 0) return(c(FDP = NA_real_, Power = 0))
+  c(
+    FDP   = round(sum(!disc %in% which(true_de)) / length(disc), 4),
+    Power = round(sum(disc %in%  which(true_de)) / sum(true_de), 4)
+  )
+}
+
+method_names <- c("DESeq2", "Wilcoxon", "edgeR", "limma-voom",
+                  "CQRM-Approx", "CQRM-Best", "CQRM-Region", "CQRM")
+adj_list <- list(pv_deseq2, pv_wilcoxon, pv_edger, pv_limma,
+                 adj_approx, adj_best, adj_region, adj_cqrm)
+
+fdp_power_df <- do.call(rbind, lapply(seq_along(method_names), function(i) {
+  res <- compute_fdp_power(adj_list[[i]], is_true_DE, q = q_thresh)
+  data.frame(Method = method_names[i], FDP = res["FDP"], Power = res["Power"])
+}))
+rownames(fdp_power_df) <- NULL
+
+kable(
+  fdp_power_df,
+  caption = sprintf("FDP and Power at FDR threshold q = %.2f", q_thresh),
+  align   = "r",
+  row.names = FALSE
+) |>
+  kable_styling(
+    bootstrap_options = c("striped", "hover"),
+    full_width = FALSE
+  ) |>
+  row_spec(which(fdp_power_df$Method %in% c("CQRM","CQRM-Approx","CQRM-Best","CQRM-Region")),
+           bold = TRUE, background = "#f0f7ff")
+```
+
+## Save results to CSV
+
+```{r save-results}
+dir.create("results", showWarnings = FALSE)
+write.csv(adj_pval_df,  "results/adj_pval_table.csv",  row.names = FALSE)
+write.csv(fdp_power_df, "results/fdp_power_table.csv", row.names = FALSE)
+cat("Saved adj_pval_table.csv and fdp_power_table.csv to results/\n")
+```
+
+---
+
+# Notes on CQRM Implementation
+
+## Why `solve(subsigma)` is moved outside the B-loop
+
+In all CQRM variants, the null p-value calibration loop draws `B` score
+vectors from a multivariate normal distribution with covariance `sigma`.
+For each draw `b` and each weight pattern `l`, a chi-squared statistic is
+computed as:
+
+```
+chi2 = t(subscore) %*% solve(subsigma) %*% subscore
+```
+
+Because `sigma` is **fixed** across all `B` draws (it is the analytic
+covariance matrix from the last gene), `subsigma_inv <- solve(subsigma[wt,wt])`
+can be precomputed **once per weight pattern** before the B-loop:
+
+```r
+# Outside the B-loop — computed once:
+subsigma_inv <- lapply(seq_len(L), function(l) {
+  wt <- wt_logical[[l]]
+  solve(sigma[wt, wt, drop = FALSE])
+})
+
+# Inside the B-loop — reuse the precomputed inverse:
+for (b in seq_len(B)) {
+  bscore <- score_null[b, ]
+  for (l in seq_len(L)) {
+    wt      <- wt_logical[[l]]
+    subscore <- bscore[wt]
+    subchi2  <- drop(t(subscore) %*% subsigma_inv[[l]] %*% subscore)
+    ...
+  }
+}
+```
+
+This reduces `B × L` matrix inversions to `L` inversions, providing a
+significant speedup especially for large `B`.
+
+## CQRM variant comparison
+
+| Variant | Subsets tested | Null sigma | Speed |
+|---------|---------------|------------|-------|
+| `CQRM` | All 2^K-1 non-empty | MVN (matrix) | Slowest |
+| `CQRM.region` | Contiguous k-windows | MVN (matrix) | Medium |
+| `CQRM.best` | Individual quantiles | Independent normals | Fast |
+| `CQRM.approx` | All 2^K-1 non-empty | MVN (matrix) | Fastest† |
+
+†`CQRM.approx` replaces M jitter replicates with a single `rq.wfit` call per
+quantile.
+
+---
+
+# Session Info
+
+```{r session-info}
+sessionInfo()
+```
